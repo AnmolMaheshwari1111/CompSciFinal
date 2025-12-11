@@ -2,22 +2,63 @@ import os
 import pandas as pd
 import re
 from bs4 import BeautifulSoup
+import email.parser
+import email.policy
+import io
+import mimetypes
 
 # --- Configuration ---
 FOLDER_NAME = 'allen_results'
 OUTPUT_FILE = 'Allen_Dark_Analysis.xlsx'
+ALLOWED_EXTENSIONS = ('.html', '.mht', '.mhtml') # Added MHTML extensions
 
-def parse_allen_result(file_path):
-    """Parses a single HTML file and returns a dictionary of data."""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        html_content = f.read()
+# --- MHTML Utility Function ---
+def read_mhtml(file_path):
+    """
+    Reads an MHTML file and extracts the main HTML content.
+    MHTML is a multipart/related MIME message.
+    """
+    try:
+        # Read the file content as bytes
+        with open(file_path, 'rb') as fp:
+            msg = email.parser.BytesParser(policy=email.policy.default).parse(fp)
 
+        # MHTML is typically 'multipart/related'
+        if msg.is_multipart():
+            # Find the main HTML part, usually the first part or the one with content-type text/html
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                
+                # We are looking for the main HTML file
+                if content_type == 'text/html':
+                    # Decode the payload (main HTML content)
+                    payload = part.get_payload(decode=True)
+                    # Get the charset from the part headers, default to UTF-8
+                    charset = part.get_content_charset() or 'utf-8'
+                    
+                    # Return the decoded HTML as a string
+                    return payload.decode(charset)
+        
+        # If it's not multipart or we couldn't find text/html part
+        print(f"Warning: Could not find main HTML part in MHTML file: {file_path}")
+        return None
+
+    except Exception as e:
+        print(f"Error processing MHTML file {file_path}: {e}")
+        return None
+
+# --- Main Parsing Function (Unchanged, now accepts content string) ---
+def parse_allen_result(file_path, html_content):
+    """Parses HTML/MHTML content and returns a dictionary of data."""
+    
     filename = os.path.basename(file_path)
     # Initialize with Date column (empty placeholder for new files)
     row_data = {'Date': '', 'File Name': filename}
 
     soup = BeautifulSoup(html_content, 'html.parser')
     
+    # 1. Global Info
+    # ... (rest of the parsing logic is unchanged)
     # 1. Global Info
     title_div = soup.find('div', {'data-testid': 'test-title'})
     if title_div:
@@ -77,6 +118,8 @@ def parse_allen_result(file_path):
 
     return row_data
 
+
+# --- Unchanged Helper Functions ---
 def calculate_accuracy(df):
     """Calculates accuracy percentages for Global and Subjects."""
     # Global Accuracy
@@ -98,6 +141,7 @@ def calculate_accuracy(df):
 
 def apply_styling(df, output_file):
     """Writes the DataFrame to Excel with Dark Mode and Conditional Formatting."""
+    # ... (Styling logic is unchanged)
     
     # Organize Columns
     cols = ['Date', 'File Name', 'Test Name', 'Glb Score', 'Percentile', 'Glb Acc%']
@@ -152,6 +196,7 @@ def apply_styling(df, output_file):
     writer.close()
     print(f"Successfully updated and saved to '{output_file}'")
 
+# --- Main Logic (Updated to handle file extensions) ---
 def update_excel_sheet():
     # 1. Check for existing data
     if os.path.exists(OUTPUT_FILE):
@@ -168,16 +213,17 @@ def update_excel_sheet():
         df_existing = pd.DataFrame()
         existing_files = []
 
-    # 2. Scan folder for NEW files
+    # 2. Scan folder for NEW files (HTML/MHTML)
     if not os.path.exists(FOLDER_NAME):
         print(f"Error: Folder '{FOLDER_NAME}' not found.")
         return
 
-    all_files = [f for f in os.listdir(FOLDER_NAME) if f.endswith('.html')]
+    # Check for all allowed extensions
+    all_files = [f for f in os.listdir(FOLDER_NAME) if f.lower().endswith(ALLOWED_EXTENSIONS)]
     new_files = [f for f in all_files if f not in existing_files]
 
     if not new_files:
-        print("No new HTML files found. Excel is up to date.")
+        print("No new HTML/MHTML files found. Excel is up to date.")
         return
 
     print(f"Found {len(new_files)} new files. Parsing...")
@@ -185,12 +231,28 @@ def update_excel_sheet():
     # 3. Parse New Files
     new_results = []
     for file in new_files:
-        try:
-            data = parse_allen_result(os.path.join(FOLDER_NAME, file))
-            new_results.append(data)
-            print(f" -> Parsed: {file}")
-        except Exception as e:
-            print(f" -> Error parsing {file}: {e}")
+        file_path = os.path.join(FOLDER_NAME, file)
+        
+        # Determine the file type and read content
+        if file.lower().endswith(('.mht', '.mhtml')):
+            html_content = read_mhtml(file_path)
+            file_type = "MHTML"
+        elif file.lower().endswith('.html'):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            file_type = "HTML"
+        else:
+            # Should not happen if ALLOWED_EXTENSIONS check is correct
+            continue
+
+        if html_content:
+            try:
+                # Pass the content string to the parser
+                data = parse_allen_result(file_path, html_content)
+                new_results.append(data)
+                print(f" -> Parsed ({file_type}): {file}")
+            except Exception as e:
+                print(f" -> Error parsing {file} content: {e}")
 
     if new_results:
         df_new = pd.DataFrame(new_results)
