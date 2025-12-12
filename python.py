@@ -19,38 +19,36 @@ def read_mhtml(file_path):
     MHTML is a multipart/related MIME message.
     """
     try:
+        # Read the file content as bytes
         with open(file_path, 'rb') as fp:
             msg = email.parser.BytesParser(policy=email.policy.default).parse(fp)
 
-        # Helper to decode payload with fallback
+        # Helper to safely decode payload
         def decode_payload(part):
             payload = part.get_payload(decode=True)
             if not payload:
                 return None
-            
             charset = part.get_content_charset() or 'utf-8'
             try:
                 return payload.decode(charset, errors='replace')
             except LookupError:
-                # Fallback to utf-8 if charset is invalid
                 return payload.decode('utf-8', errors='replace')
 
+        # MHTML is typically 'multipart/related'
         if msg.is_multipart():
-            # 1. Try to find part with text/html
+            # 1. Look for explicit text/html part
             for part in msg.walk():
                 if part.get_content_type() == 'text/html':
                     return decode_payload(part)
             
-            # 2. If no explicit text/html, checking for first part that looks like HTML
-            # (Sometimes content-type might be missing or generic)
+            # 2. Fallback: Look for text content that resembles HTML
             for part in msg.walk():
                 if part.get_content_maintype() == 'text':
                     content = decode_payload(part)
                     if content and '<!DOCTYPE html' in content[:1000]:
                         return content
-
         else:
-            # Not multipart, maybe just a plain HTML file saved with .mhtml extension
+            # Handle case where it might not be multipart
             return decode_payload(msg)
         
         print(f"Warning: Could not find main HTML part in MHTML file: {file_path}")
@@ -75,12 +73,11 @@ def parse_allen_result(file_path, html_content):
         full_text = " ".join(title_div.get_text(separator=" ").split())
         row_data['Test Name'] = full_text.replace("Result:", "").strip()
 
-    # Scores (Updated regex to be slightly more flexible if classes change order)
-    # Looking for the specific structure of the score circle text
+    # Scores
     score_element = soup.find('div', class_=re.compile(r'text-3xl.*leading-10'))
     if score_element:
         row_data['Glb Score'] = int(score_element.get_text(strip=True))
-        # Usually the sibling or next element contains max marks, but relying on regex for safety
+        # Try to find max marks (usually the next similar element)
         score_matches = re.findall(r'text-3xl.*?leading-10.*?>(\d+)</div>', html_content)
         if len(score_matches) >= 2:
             row_data['Max Marks'] = int(score_matches[1])
@@ -90,7 +87,7 @@ def parse_allen_result(file_path, html_content):
     if percentile_match:
         row_data['Percentile'] = float(percentile_match.group(1))
 
-    # Predictive AIR (Added Logic)
+    # Predictive AIR
     air_element = soup.find(attrs={"data-testid": "rank-range"})
     if air_element:
         row_data['Predictive AIR'] = air_element.get_text(strip=True)
@@ -109,7 +106,6 @@ def parse_allen_result(file_path, html_content):
         row_data['Glb U'] = int(unattempted_match.group(1))
 
     # 2. Subject Stats
-    # Using regex to find subject sections then parsing the nearby numbers
     subject_matches = re.finditer(r'(PART-\d+\s*:\s*[A-Z]+)', html_content)
     subj_map = {"PHYSICS": "Phy", "CHEMISTRY": "Chem", "MATHEMATICS": "Math"}
 
@@ -122,16 +118,14 @@ def parse_allen_result(file_path, html_content):
                 break
 
         start_idx = match.end()
-        # Look ahead a bit to find the scores
         search_window = html_content[start_idx:start_idx+1500]
-        # Matches <div class="col-span-2 text-center">87</div>
         numbers = re.findall(r'class="col-span-2 text-center">(\d+)</div>', search_window)
         
         if len(numbers) >= 3:
             s_score = int(numbers[0])
             s_correct = int(numbers[1])
             s_incorrect = int(numbers[2])
-            s_unattempted = 25 - (s_correct + s_incorrect) # Assuming 25 qs per subject
+            s_unattempted = 25 - (s_correct + s_incorrect)
             
             row_data[f'{short_subj} S'] = s_score
             row_data[f'{short_subj} C'] = s_correct
@@ -144,11 +138,9 @@ def parse_allen_result(file_path, html_content):
 # --- Helper Functions ---
 def calculate_accuracy(df):
     """Calculates accuracy percentages for Global and Subjects."""
-    # Global Accuracy
     if 'Glb C' in df.columns and 'Glb W' in df.columns:
         df['Glb Acc%'] = df.apply(lambda x: (x['Glb C'] / (x['Glb C'] + x['Glb W']) * 100) if (x['Glb C'] + x['Glb W']) > 0 else 0, axis=1)
 
-    # Subject Accuracy
     for subj in ['Phy', 'Chem', 'Math']:
         c_col = f'{subj} C'
         w_col = f'{subj} W'
@@ -179,22 +171,17 @@ def apply_styling(df, output_file):
     workbook = writer.book
     worksheet = writer.sheets['Sheet1']
     
-    # Define Formats
-    dark_bg = workbook.add_format({'bg_color': '#000000', 'font_color': '#FFFFFF', 'border': 1, 'border_color': '#444444'})
-    header_fmt = workbook.add_format({'bg_color': '#222222', 'font_color': '#FFFFFF', 'bold': True, 'border': 1, 'align': 'center'})
-    percent_fmt = workbook.add_format({'num_format': '0.0', 'bg_color': '#000000', 'font_color': '#FFFFFF'})
-    
-    # Apply Dark Background to Data Area
+    # Apply Dark Background
     (max_row, max_col) = df.shape
-    worksheet.set_column(0, max_col-1, 10, dark_bg) 
+    worksheet.set_column(0, max_col-1, 10)
     
-    # Widen Title Columns and AIR
+    # Widen Title Columns
     worksheet.set_column('B:C', 25) 
-    worksheet.set_column('F:F', 18)
+    worksheet.set_column('F:F', 18) # Predictive AIR
     
     # Write Headers
     for col_num, value in enumerate(df.columns.values):
-        worksheet.write(0, col_num, value, header_fmt)
+        worksheet.write(0, col_num, value)
 
     # Conditional Formatting
     for i, col_name in enumerate(df.columns):
@@ -206,7 +193,7 @@ def apply_styling(df, output_file):
         if any(x in col_name for x in ['Score', 'Percentile', 'Acc%', ' C', ' S']):
             worksheet.conditional_format(rng, {'type': '3_color_scale', 'min_color': '#F8696B', 'mid_color': '#FFEB84', 'max_color': '#63BE7B'})
             if 'Acc%' in col_name or 'Percentile' in col_name:
-                 worksheet.set_column(i, i, 12, percent_fmt)
+                 worksheet.set_column(i, i, 12)
 
         elif ' W' in col_name:
             worksheet.conditional_format(rng, {'type': '3_color_scale', 'min_color': '#63BE7B', 'mid_color': '#FFEB84', 'max_color': '#F8696B'})
@@ -231,7 +218,7 @@ def update_excel_sheet():
         df_existing = pd.DataFrame()
         existing_files = []
 
-    # 2. Scan folder
+    # 2. Scan folder for NEW files
     if not os.path.exists(FOLDER_NAME):
         print(f"Error: Folder '{FOLDER_NAME}' not found.")
         return
@@ -239,40 +226,36 @@ def update_excel_sheet():
     all_files = [f for f in os.listdir(FOLDER_NAME) if f.lower().endswith(ALLOWED_EXTENSIONS)]
     new_files = [f for f in all_files if f not in existing_files]
 
-    if not new_files:
-        print("No new files found. Refreshing styling...")
-        if not df_existing.empty:
-            apply_styling(df_existing, OUTPUT_FILE)
-        return
-
-    print(f"Found {len(new_files)} new files. Parsing...")
-
     # 3. Parse New Files
     new_results = []
-    for file in new_files:
-        file_path = os.path.join(FOLDER_NAME, file)
-        
-        html_content = None
-        if file.lower().endswith(('.mht', '.mhtml')):
-            html_content = read_mhtml(file_path)
-        elif file.lower().endswith('.html'):
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
-            except Exception as e:
-                print(f"Error reading HTML file {file}: {e}")
+    if new_files:
+        print(f"Found {len(new_files)} new files. Parsing...")
+        for file in new_files:
+            file_path = os.path.join(FOLDER_NAME, file)
+            
+            html_content = None
+            if file.lower().endswith(('.mht', '.mhtml')):
+                html_content = read_mhtml(file_path)
+            elif file.lower().endswith('.html'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                except Exception as e:
+                    print(f"Error reading HTML file {file}: {e}")
 
-        if html_content:
-            try:
-                data = parse_allen_result(file_path, html_content)
-                new_results.append(data)
-                print(f" -> Parsed: {file}")
-            except Exception as e:
-                print(f" -> Error parsing content of {file}: {e}")
-        else:
-            print(f" -> Skipped {file} (Could not extract HTML)")
+            if html_content:
+                try:
+                    data = parse_allen_result(file_path, html_content)
+                    new_results.append(data)
+                    print(f" -> Parsed: {file}")
+                except Exception as e:
+                    print(f" -> Error parsing content of {file}: {e}")
+            else:
+                print(f" -> Skipped {file} (Could not extract HTML)")
+    else:
+        print("No new files found to parse.")
 
-    # 4. Concatenate and Save
+    # 4. Combine Data
     if new_results:
         df_new = pd.DataFrame(new_results)
         df_new = calculate_accuracy(df_new)
@@ -281,12 +264,31 @@ def update_excel_sheet():
             df_final = pd.concat([df_existing, df_new], ignore_index=True)
         else:
             df_final = df_new
-            
-        apply_styling(df_final, OUTPUT_FILE)
     else:
-        # Just re-save to ensure headers/styling are updated if code changed but no new files
-        if not df_existing.empty:
-            apply_styling(df_existing, OUTPUT_FILE)
+        df_final = df_existing
+
+    if df_final.empty:
+        print("No data available to save.")
+        return
+
+    # 5. Sort by File Name (Natural Sort)
+    # This logic ensures "test1", "test2", "test10" are sorted numerically (1, 2, 10) instead of (1, 10, 2)
+    try:
+        def natural_keys(text):
+            return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(text))]
+        
+        df_final = df_final.sort_values(
+            by='File Name', 
+            key=lambda x: x.map(natural_keys),
+            ignore_index=True
+        )
+        print("Sorted data by File Name (natural order).")
+    except Exception as e:
+        print(f"Warning: Natural sort failed ({e}). Falling back to standard sort.")
+        df_final = df_final.sort_values(by='File Name', ignore_index=True)
+
+    # 6. Save with Styling
+    apply_styling(df_final, OUTPUT_FILE)
 
 if __name__ == "__main__":
     update_excel_sheet()
